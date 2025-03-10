@@ -25,17 +25,17 @@ class ssdSDF(nn.Module):
 
 def mod_L1_loss(x,y):
     l1=nn.L1Loss(reduction='sum')
-    return l1(clamp(x,TOL), clamp(y,TOL))
+    return l1(torch.squeeze(clamp(x,TOL)), torch.squeeze(clamp(y,TOL)))
 
 def clamp(x, delta):
     return torch.minimum(torch.full_like(x, delta), torch.maximum(torch.full_like(x,-delta), x))
     
 def train_ssdSDF(dataloader, model, loss_fn):
-    learning_rate = 1e-3
+    learning_rate = 0.0001
     batch_size = 64
 
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     size = len(dataloader.dataset)
     # Set the model to training mode - important for batch normalization and dropout layers
@@ -102,6 +102,6 @@ if __name__ == "__main__":
     epochs = 10
     for t in range(epochs):
         print(f"Epoch {t+1}\n-------------------------------")
-        train_ssdSDF(dl,model, nn.MSELoss)
-        test_loop(dl_test, model, nn.MSELoss)
+        train_ssdSDF(dl, model, mod_L1_loss)
+        test_loop(dl_test, model, mod_L1_loss)
     print("Done!")

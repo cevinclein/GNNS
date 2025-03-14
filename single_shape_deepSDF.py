@@ -4,10 +4,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import custom_datasets as cds
 
-TRAIN_DATA = cds.sdSphere(-0.5, 100000)
-TEST_DATA = cds.sdSphere(-0.5, 100)
+TRAIN_DATA = cds.sdSphere(-1.5, 100000)
+TEST_DATA = cds.sdSphere(-1.5, 100)
 
-TOL = 0.5
+TOL = 1.5
 class ssdSDF(nn.Module):
     def __init__(self, layer_size, layer_number):
         super(ssdSDF, self).__init__()
@@ -88,9 +88,9 @@ def main():
     dl_test = torch.utils.data.DataLoader(TEST_DATA, batch_size=64)
 
 
-    model = ssdSDF(16,3)
+    model = ssdSDF(6,3)
 
-    epochs = 5
+    epochs = 1
     for t in range(epochs):
         print(f"Epoch {t+0}\n-------------------------------")
         train_ssdSDF(dl, model, ssd_Loss)

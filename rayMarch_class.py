@@ -5,39 +5,56 @@ from single_shape_deepSDF import main
 
 MAX_DIST = 100.0
 MAX_STEPS = 200
-EPSILON = 0.0001
+EPSILON = 1
 
 class RAY_MARCH_RENDERER():
     def __init__(self, function:callable):
         self.function = function
 
-    def trace(self, ro, rd):
-        """
-        Ray-march from ray origin 'ro' along direction 'rd'.
-
-        Parameters:
-          ro: Ray origin as a NumPy array (3,)
-          rd: Normalized ray direction (3,)
-
-        Returns:
-          A tuple (depth, steps) where:
-             depth: The distance along the ray where the hit was detected.
-                    If no hit is found within MAX_STEPS, returns MAX_DIST.
-             steps: A measure based on the number of remaining steps (used for shading).
-        """
-        depth = 0.0
+#    def trace(self, ro, rd):
+#        """
+#        Ray-march from ray origin 'ro' along direction 'rd'.
+#
+#        Parameters:
+#          ro: Ray origin as a NumPy array (3,)
+#          rd: Normalized ray direction (3,)
+#
+#        Returns:
+#          A tuple (depth, steps) where:
+#             depth: The distance along the ray where the hit was detected.
+#                    If no hit is found within MAX_STEPS, returns MAX_DIST.
+#             steps: A measure based on the number of remaining steps (used for shading).
+#        """
+#        depth = 0.0
+#        for i in range(MAX_STEPS):
+#            p = np.asarray(ro + depth * rd, dtype=np.float32)
+#            p = torch.from_numpy(p)
+#            with torch.no_grad():
+#                d = self.function(p).numpy()
+#                if d < EPSILON:
+#                    steps = MAX_STEPS - i  # as in shader: steps = 200 - i
+#                    return depth, steps
+#                depth += d
+#                if depth > MAX_DIST:
+#                    return MAX_DIST, MAX_STEPS - i
+#        return MAX_DIST, 0
+#    
+    def trace(self, ro, rds):
+        depths = np.zeros(rds.shape[0])
+        steps = np.zeros(rds.shape[0])
         for i in range(MAX_STEPS):
-            p = np.asarray(ro + depth * rd, dtype=np.float32)
-            p = torch.from_numpy(p)
             with torch.no_grad():
-                d = self.function(p).numpy()
-                if d < EPSILON:
-                    steps = MAX_STEPS - i  # as in shader: steps = 200 - i
-                    return depth, steps
-                depth += d
-                if depth > MAX_DIST:
-                    return MAX_DIST, MAX_STEPS - i
-        return MAX_DIST, 0
+                p_array = np.asarray(np.full(rds.shape, ro) + np.column_stack((depths, depths, depths)) * rds, dtype=np.float32)
+                d = self.function(torch.from_numpy(p_array)).numpy()
+                depths = np.where(d < EPSILON,depths,depths + d)
+                steps = np.where(d < EPSILON, steps + 1, steps)
+                steps = np.where(depths > MAX_DIST, steps+1, steps)
+                
+
+        depths = np.where(depths > MAX_DIST, MAX_DIST, depths)
+        return depths, steps
+
+
 
     def render_scene(self, width, height):
         """
@@ -53,38 +70,36 @@ class RAY_MARCH_RENDERER():
         The pixel color is computed in grayscale: if a hit is detected the intensity is proportional
         to (steps / MAX_STEPS), otherwise black.
         """
-        image = np.zeros((height, width, 3), dtype=np.uint8)
+        image = np.zeros((height * width, 3), dtype=np.uint8)
         # Camera setup
-        ro = np.array([0.0, 0.0, 2.5])
+        ro = np.array([0.0, 0.0, 4.5])
 
+        # create coordiate grid
+        x_coord = np.arange(height)
+        y_coord = np.arange(width)
+        px_x , px_y = np.meshgrid(x_coord, y_coord)
 
-        for y in range(height):
-            for x in range(width):
-                # Convert pixel coordinate to normalized coordinate,
-                # center at (width/2, height/2) and divide by height.
-                xy = np.array([(x - width / 2) / height,
-                               (y - height / 2) / height])
-                # Construct the ray direction and normalize.
-                rd = np.array([xy[0], xy[1], -1.0])
-                rd = rd / np.linalg.norm(rd)
+        # Convert pixel coordinate to normalized coordinate,
+        # center at (width/2, height/2) and divide by height.
+        rc_x      = ((px_x - width / 2) / height).flatten()
+        rc_y      = ((px_y - height/ 2) / height).flatten()
 
-                depth, steps = self.trace(ro, rd)
-                if depth < MAX_DIST:
-                    # Compute brightness based on steps.
-                    brightness = np.clip(steps / MAX_STEPS, 0.0, 1.0) * 255
-                    color = (int(brightness), int(brightness), int(brightness))
-                else:
-                    color = (0, 0, 0)
-                image[y, x] = color
-            # (Optional) print progress
-            if y % 20 == 0:
-                print(f"Rendered {y}/{height} rows")
-        return image
+        rds = np.column_stack((rc_x, rc_y, np.full_like(rc_x,-1.0)))
+        rd_norm = np.linalg.norm(rds, axis=1)
+        rds = rds / np.column_stack((rd_norm, rd_norm, rd_norm))
+
+       
+
+        depth, steps = self.trace(ro, rds)
+        brightness = np.where(depth < MAX_DIST, np.trunc(np.clip(steps/MAX_STEPS,0.0,1.0) * 255), 0)
+        image = np.column_stack((brightness, brightness, brightness))
+        
+        return np.reshape(image,(height, width, 3))
 
     def main_loop(self):
         # Initialize Pygame.
         pygame.init()
-        width, height = 400, 200
+        width, height = 800, 400
         screen = pygame.display.set_mode((width, height))
         pygame.display.set_caption("3D Ray Marching (Pygame)")
 
@@ -113,5 +128,6 @@ class RAY_MARCH_RENDERER():
 if __name__ == "__main__":
     
     model = main()
+    import rayMarch
     renderer = RAY_MARCH_RENDERER(model)
     renderer.main_loop()

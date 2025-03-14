@@ -2,9 +2,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import custom_datasets as cds
 
+TRAIN_DATA = cds.sdSphere(-0.5, 100000)
+TEST_DATA = cds.sdSphere(-0.5, 100)
 
-TOL = 0.1
+TOL = 0.5
 class ssdSDF(nn.Module):
     def __init__(self, layer_size, layer_number):
         super(ssdSDF, self).__init__()
@@ -21,14 +24,15 @@ class ssdSDF(nn.Module):
         
 
     def forward(self, x):
-        return self.model(x)
+        return torch.squeeze(self.model(x))
 
-def mod_L1_loss(x,y):
-    l1=nn.L1Loss(reduction='sum')
-    return l1(torch.squeeze(clamp(x,TOL)), torch.squeeze(clamp(y,TOL)))
+def ssd_Loss(x,y):
+    delta = torch.full_like(x, TOL)
+    clamp_x = torch.minimum(delta, torch.maximum(-delta, x))
+    clamp_y = torch.minimum(delta, torch.maximum(-delta, y))
 
-def clamp(x, delta):
-    return torch.minimum(torch.full_like(x, delta), torch.maximum(torch.full_like(x,-delta), x))
+    l1_loss = nn.L1Loss(reduction='sum')
+    return l1_loss(clamp_x, clamp_y)
     
 def train_ssdSDF(dataloader, model, loss_fn):
     learning_rate = 0.0001
@@ -71,37 +75,28 @@ def test_loop(dataloader, model, loss_fn):
         for X, y in dataloader:
             pred = model(X)
             test_loss += loss_fn(pred, y).item()
-            correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+            correct += (pred == y).type(torch.float).sum().item()
 
     test_loss /= num_batches
     correct /= size
     print(f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
 
 
-if __name__ == "__main__":
+def main():
 
-    class sdSphere(torch.utils.data.Dataset):
-        def __init__(self, radius=0.5, samples = 64000):
-            self.samples = samples
-            self.coords = np.asarray(np.random.default_rng().uniform(-1.0,1.0,(self.samples,3),), dtype=np.float32)
-            self.sdf = np.linalg.norm(self.coords, axis=1) - radius
-        def __len__(self):
-            return self.samples
-        def __getitem__(self, index):
-            return self.coords[index], self.sdf[index]
+    dl = torch.utils.data.DataLoader(TRAIN_DATA, batch_size=64)
+    dl_test = torch.utils.data.DataLoader(TEST_DATA, batch_size=64)
 
 
+    model = ssdSDF(16,3)
 
-
-    dl = torch.utils.data.DataLoader(sdSphere(), batch_size=64)
-    dl_test = torch.utils.data.DataLoader(sdSphere(samples=100), batch_size=64)
-
-
-    model = ssdSDF(64,5)
-
-    epochs = 10
+    epochs = 5
     for t in range(epochs):
-        print(f"Epoch {t+1}\n-------------------------------")
-        train_ssdSDF(dl, model, mod_L1_loss)
-        test_loop(dl_test, model, mod_L1_loss)
+        print(f"Epoch {t+0}\n-------------------------------")
+        train_ssdSDF(dl, model, ssd_Loss)
+        test_loop(dl_test, model, ssd_Loss)
     print("Done!")
+    return model
+
+if __name__ == "__main__":
+    main()

@@ -3,13 +3,15 @@ import numpy as np
 import torch
 from single_shape_deepSDF import main
 
-MAX_DIST = 100.0
-MAX_STEPS = 200
-EPSILON = 1
+MAX_DIST = 10.0
+MAX_STEPS = 20
+EPSILON = 0.001
+
 
 class RAY_MARCH_RENDERER():
-    def __init__(self, function:callable):
+    def __init__(self, function:callable, model:int):
         self.function = function
+        self.model = model
 
 #    def trace(self, ro, rd):
 #        """
@@ -38,18 +40,19 @@ class RAY_MARCH_RENDERER():
 #                if depth > MAX_DIST:
 #                    return MAX_DIST, MAX_STEPS - i
 #        return MAX_DIST, 0
-#    
+
+
     def trace(self, ro, rds):
         depths = np.zeros(rds.shape[0])
-        steps = np.zeros(rds.shape[0])
+        steps = np.full(rds.shape[0], MAX_STEPS)
         for i in range(MAX_STEPS):
             with torch.no_grad():
                 p_array = np.asarray(np.full(rds.shape, ro) + np.column_stack((depths, depths, depths)) * rds, dtype=np.float32)
-                d = self.function(torch.from_numpy(p_array)).numpy()
-                depths = np.where(d < EPSILON,depths,depths + d)
-                steps = np.where(d < EPSILON, steps + 1, steps)
-                steps = np.where(depths > MAX_DIST, steps+1, steps)
-                
+                latent_p_array = np.concatenate((np.full((rds.shape[0],1), self.model), p_array), axis=1, dtype=np.float32)
+                d = self.function(torch.from_numpy(latent_p_array)).numpy()
+                depths = np.where(d < EPSILON, depths, depths + d)
+                steps = np.where(d < EPSILON, steps, steps - 1)
+                steps = np.where(depths > MAX_DIST, steps, steps - 1)
 
         depths = np.where(depths > MAX_DIST, MAX_DIST, depths)
         return depths, steps
@@ -75,8 +78,8 @@ class RAY_MARCH_RENDERER():
         ro = np.array([0.0, 0.0, 4.5])
 
         # create coordiate grid
-        x_coord = np.arange(height)
-        y_coord = np.arange(width)
+        x_coord = np.arange(width)
+        y_coord = np.arange(height)
         px_x , px_y = np.meshgrid(x_coord, y_coord)
 
         # Convert pixel coordinate to normalized coordinate,
@@ -92,6 +95,7 @@ class RAY_MARCH_RENDERER():
 
         depth, steps = self.trace(ro, rds)
         brightness = np.where(depth < MAX_DIST, np.trunc(np.clip(steps/MAX_STEPS,0.0,1.0) * 255), 0)
+        print(np.reshape(brightness, (height, width)))
         image = np.column_stack((brightness, brightness, brightness))
         
         return np.reshape(image,(height, width, 3))
@@ -99,7 +103,7 @@ class RAY_MARCH_RENDERER():
     def main_loop(self):
         # Initialize Pygame.
         pygame.init()
-        width, height = 800, 400
+        width, height = 200, 200
         screen = pygame.display.set_mode((width, height))
         pygame.display.set_caption("3D Ray Marching (Pygame)")
 
@@ -128,6 +132,5 @@ class RAY_MARCH_RENDERER():
 if __name__ == "__main__":
     
     model = main()
-    import rayMarch
     renderer = RAY_MARCH_RENDERER(model)
     renderer.main_loop()

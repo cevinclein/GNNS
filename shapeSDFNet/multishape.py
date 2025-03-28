@@ -3,32 +3,32 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-import pygame
+
+from raymarcher import Raymarcher
+from plot_utils import plot_point_cloud
+from sdf_funcs import *
+from evaluate import evaluate_model
 
 SDF_MODEL = None
-MAX_DIST = 100.0
-MAX_STEPS = 200
-EPSILON = 0.0001
 
 class ConditionalSDFModel(nn.Module):
     def __init__(self, num_functions=2, latent_size=16, input_dim=3, hidden_size=64, num_hidden_layers=3):
-        """
-        Conditional SDF Model with an encoder and a conditional decoder.
-        
-        Args:
-            num_functions (int): Number of SDF functions (e.g. 2: sphere and box).
-            latent_size (int): Dimension of the latent vector.
-            input_dim (int): Dimension of the input coordinate (here we will use 3).
-            hidden_size (int): Number of hidden units in each hidden layer.
-            num_hidden_layers (int): Number of hidden layers in each decoder branch.
-        """
+       
+        # Conditional SDF Model with an encoder and a conditional decoder.
+        # num_functions (int): Number of SDF functions (e.g. 2: sphere and box).
+        # latent_size (int): Dimension of the latent vector.
+        # input_dim (int): Dimension of the input coordinate (here we will use 3).
+        # hidden_size (int): Number of hidden units in each hidden layer.
+        # num_hidden_layers (int): Number of hidden layers in each decoder branch.
+    
         super(ConditionalSDFModel, self).__init__()
         self.num_functions = num_functions
         self.latent_size = latent_size
         self.input_dim = input_dim
         
-        # Encoder: For simplicity, use an embedding layer that maps a function label to a latent vector.
+        # Encoder: We use an embedding layer that maps a function label to a latent vector.
         self.encoder = nn.Embedding(num_functions, latent_size)
+        self.encoder.weight.data.normal_(mean=0, std=1)
         
         # Decoder: Create one branch (an MLP) per function. Each branch takes as input the concatenated
         # coordinate (3D) and latent vector, and outputs a single float.
@@ -46,19 +46,11 @@ class ConditionalSDFModel(nn.Module):
         return nn.Sequential(*layers)
     
     def forward(self, x, labels, latent_override=None):
-        """
-        Forward pass.
         
-        Args:
-            x (torch.Tensor): Input coordinates, shape (batch_size, input_dim).
-            labels (torch.Tensor): Function label indices, shape (batch_size,). 
-                                   (e.g., 0 for sphere SDF, 1 for box SDF)
-            latent_override (torch.Tensor, optional): If provided, uses this latent vector instead
-                                   of the one from the encoder.
+        # Forward pass.
+        # labels: mapped latent vectors from the encoder
+        # latent_override: only for debugging
         
-        Returns:
-            torch.Tensor: Predicted SDF values, shape (batch_size, 1).
-        """
         if latent_override is None:
             # Get latent vector from the encoder using the provided labels.
             latent = self.encoder(labels)  # Shape: (batch_size, latent_size)
@@ -78,18 +70,16 @@ class ConditionalSDFModel(nn.Module):
         return torch.cat(outputs, dim=0)
     
     def train_model(self, train_loader, num_epochs=20, learning_rate=1e-3, device='cpu'):
-        """
-        Trains the model.
         
-        Args:
-            train_loader (DataLoader): Provides tuples (x, labels, y) where
-                                       x: (batch_size, input_dim),
-                                       labels: (batch_size,) with each entry a function label,
-                                       y: (batch_size, 1) true SDF values.
-            num_epochs (int): Number of epochs.
-            learning_rate (float): Learning rate.
-            device (str): 'cpu' or 'cuda'.
-        """
+        # Trains the model.
+        # train_loader (DataLoader): Provides tuples (x, labels, y) where
+        #                            x: (batch_size, input_dim),
+        #                            labels: (batch_size,) with each entry a function label,
+        #                            y: (batch_size, 1) true SDF values.
+        # num_epochs (int): Number of epochs.
+        # learning_rate (float): Learning rate.
+        # device (str): 'cpu' or 'cuda'.
+     
         self.to(device)
         optimizer = optim.Adam(self.parameters(), lr=learning_rate)
         criterion = nn.MSELoss()
@@ -109,13 +99,10 @@ class ConditionalSDFModel(nn.Module):
             print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}")
     
     def test_model(self, test_loader, device='cpu'):
-        """
-        Evaluates the model.
         
-        Args:
-            test_loader (DataLoader): Provides tuples (x, labels, y) for evaluation.
-            device (str): 'cpu' or 'cuda'.
-        """
+        # Evaluates the model.
+        # test_loader (DataLoader): Provides tuples (x, labels, y) for evaluation.
+          
         self.to(device)
         self.eval()
         total_loss = 0.0
@@ -131,40 +118,18 @@ class ConditionalSDFModel(nn.Module):
         print(f"Test Loss: {avg_loss:.4f}")
 
 # -------------------------------------------------------------------
-# Define true SDF functions for a sphere and a box.
-def sphere_sdf(point, radius=1.0):
-    """
-    True SDF for a sphere: distance from point to the sphere surface.
-    SDF = norm(point) - radius.
-    """
-    return np.linalg.norm(point) - radius
 
-def box_sdf(point, half_extents=np.array([1.0, 1.0, 1.0])):
-    """
-    True SDF for an axis-aligned box.
-    This implementation follows:
-       sdf = norm(max(|point| - half_extents, 0)) + min(max(|point| - half_extents), 0)
-    """
-    q = np.abs(point) - half_extents
-    q_clamped = np.maximum(q, 0)
-    outside_distance = np.linalg.norm(q_clamped)
-    inside_distance = np.minimum(np.max(q), 0)
-    return outside_distance + inside_distance
-
-# -------------------------------------------------------------------
 # Data generation: create synthetic training examples using the two true SDFs.
-def generate_sdf_dataset(num_samples_per_function=500, input_range=2.0):
+def generate_sdf_dataset(sdf_funcs, num_samples_per_function=500, input_range=2.0):
     points_list = []
     labels_list = []
     sdf_values_list = []
     
-    for label in range(2):  # 0: sphere, 1: box
+    for label in range(len(sdf_funcs)):
         for _ in range(num_samples_per_function):
             point = np.random.uniform(-input_range, input_range, size=(3,))
-            if label == 0:
-                sdf_value = sphere_sdf(point, radius=1.0)
-            else:
-                sdf_value = box_sdf(point, half_extents=np.array([1.0, 1.0, 1.0]))
+            sdf_value = sdf_funcs[label](point)
+              
             points_list.append(point)
             labels_list.append(label)
             sdf_values_list.append([sdf_value])  # wrap in list to have shape (1,)
@@ -174,13 +139,14 @@ def generate_sdf_dataset(num_samples_per_function=500, input_range=2.0):
     sdf_values = np.array(sdf_values_list, dtype=np.float32)
     return points, labels, sdf_values
 
-def gen_Model():
+def gen_Model(sdf_funcs, _label):
     # For reproducibility.
     np.random.seed(42)
     torch.manual_seed(42)
     
     # Generate synthetic SDF dataset.
-    points, labels, sdf_values = generate_sdf_dataset(num_samples_per_function=500, input_range=2.0)
+    points, labels, sdf_values = generate_sdf_dataset(sdf_funcs, num_samples_per_function=500, input_range=2.0)
+    plot_point_cloud(points, labels, _label)
     
     # Create a TensorDataset and DataLoaders.
     dataset = TensorDataset(torch.from_numpy(points), torch.from_numpy(labels), torch.from_numpy(sdf_values))
@@ -188,7 +154,7 @@ def gen_Model():
     test_loader = DataLoader(dataset, batch_size=32, shuffle=False)
     
     # Initialize the conditional SDF model.
-    model = ConditionalSDFModel(num_functions=2, latent_size=16, input_dim=3, hidden_size=64, num_hidden_layers=3)
+    model = ConditionalSDFModel(num_functions=3, latent_size=16, input_dim=3, hidden_size=64, num_hidden_layers=3)
     
     # Train the model.
     model.train_model(train_loader, num_epochs=20, learning_rate=1e-3, device='cpu')
@@ -202,10 +168,10 @@ def gen_Model():
     test_point = torch.tensor([[0.5, 0.5, 0.5]], dtype=torch.float32)
     test_label = torch.tensor([0], dtype=torch.long)  # 0 for sphere
     
-    # Option 1: Let the model use its encoder to generate the latent vector.
+    # Let the model use its encoder to generate the latent vector.
     output_using_encoder = model(test_point, test_label)
     
-    # Option 2: Override the latent vector with a custom latent vector.
+    # Override the latent vector with a custom latent vector.
     # (For example, a randomly sampled latent vector.)
     custom_latent = torch.randn(1, 16)  # custom latent vector with same dimension
     output_using_custom_latent = model(test_point, test_label, latent_override=custom_latent)
@@ -216,115 +182,33 @@ def gen_Model():
     global SDF_MODEL
     SDF_MODEL = model
 
-gen_Model()
+# ========================================================================================================== #
 
-# =====================================================================================================
+# choose which SDF learned by the model from sdf_func_list should be
+# evaluated and displayed. Label is the index of the functions in sdf_func_list should.
+LABEL = 2
+
+# Add more SDFs the model should learen in sdf_funcs.py
+sdf_func_list = [
+    sphere_sdf,
+    box_sdf,
+    sd_box_frame
+]
 
 # Here we call the SDF, label 0 is the sphere and label 1 is the box
-def SDF(p, label = 0):
+def SDF(p):
     x = torch.tensor([p], dtype=torch.float32)
-    test_label = torch.tensor([label], dtype=torch.long)
-    
-    custom_latent = torch.randn(1, 16)
-    x = SDF_MODEL(x, test_label, custom_latent)
-    x = x.item() #detach().numpy()
+    test_label = torch.tensor([LABEL], dtype=torch.long)
+    x = SDF_MODEL(x, test_label)
+    x = x.item()
     return x
-    
-
-def trace(ro, rd):
-    """
-    Ray-march from ray origin 'ro' along direction 'rd'.
-    
-    Parameters:
-      ro: Ray origin as a NumPy array (3,)
-      rd: Normalized ray direction (3,)
-      
-    Returns:
-      A tuple (depth, steps) where:
-         depth: The distance along the ray where the hit was detected.
-                If no hit is found within MAX_STEPS, returns MAX_DIST.
-         steps: A measure based on the number of remaining steps (used for shading).
-    """
-    depth = 0.0
-    for i in range(MAX_STEPS):
-        p = ro + depth * rd
-        d = SDF(p)
-        if d < EPSILON:
-            steps = MAX_STEPS - i  # as in shader: steps = 200 - i
-            return depth, steps
-        depth += d
-        if depth > MAX_DIST:
-            return MAX_DIST, MAX_STEPS - i
-    return MAX_DIST, 0
-
-def render_scene(width, height):
-    """
-    Renders the scene by iterating over every pixel, computing a ray direction,
-    ray marching into the scene, and returning an image array of shape (height, width, 3).
-    
-    The ray setup follows:
-      - fragCoord: pixel coordinate.
-      - xy = (fragCoord - (iResolution/2)) / iResolution.y,
-      - rd = normalize(vec3(xy, -1)).
-      - ro is set to (0, 0, 4.5) (camera position).
-      
-    The pixel color is computed in grayscale: if a hit is detected the intensity is proportional
-    to (steps / MAX_STEPS), otherwise black.
-    """
-    image = np.zeros((height, width, 3), dtype=np.uint8)
-    # Camera setup
-    ro = np.array([0.0, 0.0, 4.5])
-    
-    for y in range(height):
-        for x in range(width):
-            # Convert pixel coordinate to normalized coordinate,
-            # center at (width/2, height/2) and divide by height.
-            xy = np.array([(x - width / 2) / height,
-                           (y - height / 2) / height])
-            # Construct the ray direction and normalize.
-            rd = np.array([xy[0], xy[1], -1.0])
-            rd = rd / np.linalg.norm(rd)
-            
-            depth, steps = trace(ro, rd)
-            if depth < MAX_DIST:
-                # Compute brightness based on steps.
-                brightness = np.clip(steps / MAX_STEPS, 0.0, 1.0) * 255
-                color = (int(brightness), int(brightness), int(brightness))
-            else:
-                color = (0, 0, 0)
-            image[y, x] = color
-        # (Optional) print progress
-        if y % 20 == 0:
-            print(f"Rendered {y}/{height} rows")
-    return image
 
 def main():
-    # Initialize Pygame.
-    pygame.init()
-    width, height = 800, 600
-    screen = pygame.display.set_mode((width, height))
-    pygame.display.set_caption("3D Ray Marching (Pygame)")
+    gen_Model(sdf_func_list, LABEL)
+    evaluate_model(sphere_sdf, SDF, x_start=0, x_end=1, num_points=2000, plot=True)
     
-    # Render the scene into an image array.
-    print("Rendering scene...")
-    image = render_scene(width, height)
-    print("Rendering complete.")
+    raym = Raymarcher(800, 600, [0,0,4.5], SDF)
+    raym.render()
     
-    # Pygame's surfarray expects an array with shape (width, height, 3),
-    # so we transpose the image.
-    surface = pygame.surfarray.make_surface(np.transpose(image, (1, 0, 2)))
-    
-    # Main loop: display the rendered image until the user closes the window.
-    running = True
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-        
-        screen.blit(surface, (0, 0))
-        pygame.display.flip()
-    
-    pygame.quit()
-
 if __name__ == "__main__":
     main()

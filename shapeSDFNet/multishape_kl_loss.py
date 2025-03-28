@@ -3,12 +3,14 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-import pygame
 
 SDF_MODEL = None
-MAX_DIST = 100.0
-MAX_STEPS = 200
-EPSILON = 0.0001
+
+from raymarcher import Raymarcher
+from plot_utils import plot_point_cloud
+from sdf_funcs import *
+from evaluate import evaluate_model
+
 
 class ConditionalSDFVAE(nn.Module):
     def __init__(self, num_functions=2, latent_size=16, input_dim=3, hidden_size=64, num_hidden_layers=3):
@@ -166,40 +168,18 @@ class ConditionalSDFVAE(nn.Module):
         print(f"Test Loss: {avg_loss:.4f}")
 
 # -------------------------------------------------------------------
-# Define true SDF functions for a sphere and a box.
-def sphere_sdf(point, radius=1.0):
-    """
-    True SDF for a sphere: distance from point to the sphere surface.
-    SDF = norm(point) - radius.
-    """
-    return np.linalg.norm(point) - radius
 
-def box_sdf(point, half_extents=np.array([1.0, 1.0, 1.0])):
-    """
-    True SDF for an axis-aligned box.
-    This implementation follows:
-       sdf = norm(max(|point| - half_extents, 0)) + min(max(|point| - half_extents), 0)
-    """
-    q = np.abs(point) - half_extents
-    q_clamped = np.maximum(q, 0)
-    outside_distance = np.linalg.norm(q_clamped)
-    inside_distance = np.minimum(np.max(q), 0)
-    return outside_distance + inside_distance
-
-# -------------------------------------------------------------------
 # Data generation: create synthetic training examples using the two true SDFs.
-def generate_sdf_dataset(num_samples_per_function=500, input_range=2.0):
+def generate_sdf_dataset(sdf_funcs, num_samples_per_function=500, input_range=2.0):
     points_list = []
     labels_list = []
     sdf_values_list = []
     
-    for label in range(2):  # 0: sphere, 1: box
+    for label in range(len(sdf_funcs)):
         for _ in range(num_samples_per_function):
             point = np.random.uniform(-input_range, input_range, size=(3,))
-            if label == 0:
-                sdf_value = sphere_sdf(point, radius=1.0)
-            else:
-                sdf_value = box_sdf(point, half_extents=np.array([1.0, 1.0, 1.0]))
+            sdf_value = sdf_funcs[label](point)
+              
             points_list.append(point)
             labels_list.append(label)
             sdf_values_list.append([sdf_value])  # wrap in list to have shape (1,)
@@ -209,13 +189,14 @@ def generate_sdf_dataset(num_samples_per_function=500, input_range=2.0):
     sdf_values = np.array(sdf_values_list, dtype=np.float32)
     return points, labels, sdf_values
 
-def gen_Model():
+def gen_Model(sdf_funcs, _label):
     # For reproducibility.
     np.random.seed(42)
     torch.manual_seed(42)
     
     # Generate synthetic SDF dataset.
-    points, labels, sdf_values = generate_sdf_dataset(num_samples_per_function=500, input_range=2.0)
+    points, labels, sdf_values = generate_sdf_dataset(sdf_funcs, num_samples_per_function=500, input_range=2.0)
+    plot_point_cloud(points, labels, _label)
     
     # Create a TensorDataset and DataLoaders.
     dataset = TensorDataset(torch.from_numpy(points), torch.from_numpy(labels), torch.from_numpy(sdf_values))
@@ -223,7 +204,7 @@ def gen_Model():
     test_loader = DataLoader(dataset, batch_size=32, shuffle=False)
     
     # Initialize the conditional SDF VAE model.
-    model = ConditionalSDFVAE(num_functions=2, latent_size=16, input_dim=3, hidden_size=64, num_hidden_layers=3)
+    model = ConditionalSDFVAE(num_functions=3, latent_size=16, input_dim=3, hidden_size=64, num_hidden_layers=3)
     
     # Train the model.
     model.train_model(train_loader, num_epochs=60, learning_rate=1e-3, kl_weight=1.0, device='cpu')
@@ -249,115 +230,34 @@ def gen_Model():
     global SDF_MODEL
     SDF_MODEL = model
 
-gen_Model()
-
 # =====================================================================================================
 
+# choose which SDF learned by the model from sdf_func_list should be
+# evaluated and displayed. Label is the index of the functions in sdf_func_list should.
+LABEL = 0
+
+# Add more SDFs the model should learen in sdf_funcs.py
+sdf_func_list = [
+    sphere_sdf,
+    box_sdf,
+    sd_box_frame
+]
+
 # Here we call the SDF, label 0 is the sphere and label 1 is the box
-def SDF(p, label = 0):
+def SDF(p):
     x = torch.tensor([p], dtype=torch.float32)
-    test_label = torch.tensor([label], dtype=torch.long)
-    
-    custom_latent = SDF_MODEL.sample_latent(batch_size=1, device='cpu')
-    x, _ = SDF_MODEL(x, test_label, custom_latent)
+    test_label = torch.tensor([LABEL], dtype=torch.long)
+    # custom_latent = SDF_MODEL.sample_latent(batch_size=1, device='cpu')
+    x, _ = SDF_MODEL(x, test_label)
     x = x.item() #detach().numpy()
     return x
     
-
-def trace(ro, rd):
-    """
-    Ray-march from ray origin 'ro' along direction 'rd'.
-    
-    Parameters:
-      ro: Ray origin as a NumPy array (3,)
-      rd: Normalized ray direction (3,)
-      
-    Returns:
-      A tuple (depth, steps) where:
-         depth: The distance along the ray where the hit was detected.
-                If no hit is found within MAX_STEPS, returns MAX_DIST.
-         steps: A measure based on the number of remaining steps (used for shading).
-    """
-    depth = 0.0
-    for i in range(MAX_STEPS):
-        p = ro + depth * rd
-        d = SDF(p)
-        if d < EPSILON:
-            steps = MAX_STEPS - i  # as in shader: steps = 200 - i
-            return depth, steps
-        depth += d
-        if depth > MAX_DIST:
-            return MAX_DIST, MAX_STEPS - i
-    return MAX_DIST, 0
-
-def render_scene(width, height):
-    """
-    Renders the scene by iterating over every pixel, computing a ray direction,
-    ray marching into the scene, and returning an image array of shape (height, width, 3).
-    
-    The ray setup follows:
-      - fragCoord: pixel coordinate.
-      - xy = (fragCoord - (iResolution/2)) / iResolution.y,
-      - rd = normalize(vec3(xy, -1)).
-      - ro is set to (0, 0, 4.5) (camera position).
-      
-    The pixel color is computed in grayscale: if a hit is detected the intensity is proportional
-    to (steps / MAX_STEPS), otherwise black.
-    """
-    image = np.zeros((height, width, 3), dtype=np.uint8)
-    # Camera setup
-    ro = np.array([0.0, 0.0, 4.5])
-    
-    for y in range(height):
-        for x in range(width):
-            # Convert pixel coordinate to normalized coordinate,
-            # center at (width/2, height/2) and divide by height.
-            xy = np.array([(x - width / 2) / height,
-                           (y - height / 2) / height])
-            # Construct the ray direction and normalize.
-            rd = np.array([xy[0], xy[1], -1.0])
-            rd = rd / np.linalg.norm(rd)
-            
-            depth, steps = trace(ro, rd)
-            if depth < MAX_DIST:
-                # Compute brightness based on steps.
-                brightness = np.clip(steps / MAX_STEPS, 0.0, 1.0) * 255
-                color = (int(brightness), int(brightness), int(brightness))
-            else:
-                color = (0, 0, 0)
-            image[y, x] = color
-        # (Optional) print progress
-        if y % 20 == 0:
-            print(f"Rendered {y}/{height} rows")
-    return image
-
 def main():
-    # Initialize Pygame.
-    pygame.init()
-    width, height = 800, 600
-    screen = pygame.display.set_mode((width, height))
-    pygame.display.set_caption("3D Ray Marching (Pygame)")
+    gen_Model(sdf_func_list, LABEL)
+    evaluate_model(sphere_sdf, SDF, x_start=0, x_end=1, num_points=2000, plot=True)
     
-    # Render the scene into an image array.
-    print("Rendering scene...")
-    image = render_scene(width, height)
-    print("Rendering complete.")
+    raym = Raymarcher(800, 600, [0,0,4.5], SDF)
+    raym.render()
     
-    # Pygame's surfarray expects an array with shape (width, height, 3),
-    # so we transpose the image.
-    surface = pygame.surfarray.make_surface(np.transpose(image, (1, 0, 2)))
-    
-    # Main loop: display the rendered image until the user closes the window.
-    running = True
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-        
-        screen.blit(surface, (0, 0))
-        pygame.display.flip()
-    
-    pygame.quit()
-
 if __name__ == "__main__":
     main()
